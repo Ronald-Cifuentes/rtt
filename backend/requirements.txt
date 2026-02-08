@@ -9,11 +9,14 @@ numpy>=1.24.0
 torch>=2.1.0
 transformers>=4.35.0
 sentencepiece>=0.1.99
-faster-whisper>=1.0.0
+qwen-asr>=0.0.6
 
 # ── TTS ──────────────────────────────────────────────────
 edge-tts>=6.1.0
 pydub>=0.25.1
+
+# ── Scripts (WAV, resampling) ───────────────────────────
+scipy>=1.10.0
 
 # ── Testing ──────────────────────────────────────────────
 pytest>=7.0.0

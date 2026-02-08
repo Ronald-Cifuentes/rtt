@@ -16,11 +16,18 @@ load_dotenv(_root / ".env.example")  # fallback defaults
 # ── Device ────────────────────────────────────────────────
 DEVICE: str = os.getenv("DEVICE", "cpu")
 
-# ── ASR ───────────────────────────────────────────────────
-# Model sizes: tiny, base, small, medium, large-v2, large-v3
-# "base" (74M) is too small for accurate Spanish transcription.
-# "small" (244M) is minimum recommended. "medium" (769M) for better quality.
-ASR_MODEL_SIZE: str = os.getenv("ASR_MODEL_SIZE", "small")
+# ── ASR (Qwen3-ASR) ────────────────────────────────────────
+# HuggingFace model id. Options: Qwen/Qwen3-ASR-0.6B (faster), Qwen/Qwen3-ASR-1.7B (better quality)
+# Legacy: if .env has old Whisper size (base/small/medium etc.), use Qwen default
+_asr_env = os.getenv("ASR_MODEL", "Qwen/Qwen3-ASR-0.6B").strip()
+_LEGACY_WHISPER_SIZES = {"tiny", "base", "small", "medium", "large", "large-v2", "large-v3"}
+ASR_MODEL: str = (
+    "Qwen/Qwen3-ASR-0.6B"
+    if _asr_env.lower() in _LEGACY_WHISPER_SIZES
+    else _asr_env
+)
+ASR_MAX_NEW_TOKENS: int = int(os.getenv("ASR_MAX_NEW_TOKENS", "256"))
+ASR_MAX_BATCH_SIZE: int = int(os.getenv("ASR_MAX_BATCH_SIZE", "32"))
 
 # ── MT ────────────────────────────────────────────────────
 MT_MODELS: dict[str, str] = {

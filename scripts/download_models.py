@@ -15,14 +15,24 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-def download_asr_model(model_name: str, cache_dir: str):
-    """Download Faster-Whisper model."""
+
+def download_asr_model(model_name: str):
+    """Download Qwen3-ASR model (via from_pretrained, which caches to HF_HOME/transformers)."""
     print(f"\n{'='*60}")
     print(f"📥 Downloading ASR model: {model_name}")
     print(f"{'='*60}")
     try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(model_name, device="cpu", compute_type="float32", download_root=cache_dir)
+        import torch
+        from qwen_asr import Qwen3ASRModel
+        dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        device_map = "cuda:0" if torch.cuda.is_available() else "cpu"
+        model = Qwen3ASRModel.from_pretrained(
+            model_name,
+            dtype=dtype,
+            device_map=device_map,
+            max_inference_batch_size=32,
+            max_new_tokens=256,
+        )
         print(f"✅ ASR model '{model_name}' downloaded successfully.")
         del model
     except Exception as e:
@@ -50,7 +60,6 @@ def download_tts_model(model_name: str, cache_dir: str):
     print(f"📥 TTS model: {model_name}")
     print(f"{'='*60}")
     try:
-        # Attempt to download Qwen3-TTS if available
         from transformers import AutoModelForCausalLM, AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir=cache_dir, trust_remote_code=True)
@@ -63,18 +72,19 @@ def download_tts_model(model_name: str, cache_dir: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Download all models for RTT pipeline")
-    parser.add_argument("--asr-model", default=os.getenv("ASR_MODEL", "base"), help="ASR model name")
-    parser.add_argument("--mt-model", default=os.getenv("MT_MODEL", "Helsinki-NLP/opus-mt-es-en"), help="MT model name")
-    parser.add_argument("--tts-model", default=os.getenv("TTS_MODEL", "Qwen/Qwen3-TTS-0.6B"), help="TTS model name")
-    parser.add_argument("--cache-dir", default=os.getenv("MODEL_CACHE_DIR", "./models"), help="Model cache directory")
+    parser.add_argument("--asr-model", default=os.getenv("ASR_MODEL", "Qwen/Qwen3-ASR-0.6B"), help="ASR model (Qwen3-ASR HuggingFace id)")
+    parser.add_argument("--mt-model", default=os.getenv("MT_MODEL_ES_EN", "Helsinki-NLP/opus-mt-es-en"), help="MT model name")
+    parser.add_argument("--tts-model", default=os.getenv("TTS_QWEN3_MODEL", "Qwen/Qwen3-TTS-0.6B"), help="TTS model name")
+    parser.add_argument("--cache-dir", default=os.getenv("MODEL_CACHE_DIR", "./models"), help="Model cache directory (MT/TTS)")
     args = parser.parse_args()
 
     cache_dir = args.cache_dir
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
-    
-    print(f"🗂️  Model cache directory: {os.path.abspath(cache_dir)}")
 
-    download_asr_model(args.asr_model, cache_dir)
+    print(f"🗂️  Model cache directory (MT/TTS): {os.path.abspath(cache_dir)}")
+    print("   (Qwen3-ASR uses HuggingFace cache by default)")
+
+    download_asr_model(args.asr_model)
     download_mt_model(args.mt_model, cache_dir)
     download_tts_model(args.tts_model, cache_dir)
 

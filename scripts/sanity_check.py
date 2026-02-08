@@ -42,7 +42,7 @@ def main():
     check("numpy", lambda: __import__("numpy").__version__)
     check("torch", lambda: __import__("torch").__version__)
     check("transformers", lambda: __import__("transformers").__version__)
-    check("faster_whisper", lambda: __import__("faster_whisper").__version__ if hasattr(__import__("faster_whisper"), "__version__") else "installed")
+    check("qwen_asr", lambda: __import__("qwen_asr").__version__ if hasattr(__import__("qwen_asr"), "__version__") else "installed")
     check("fastapi", lambda: __import__("fastapi").__version__)
     check("uvicorn", lambda: "installed")
     check("websockets", lambda: __import__("websockets").__version__)
@@ -58,31 +58,34 @@ def main():
     # ── Config ──
     print(f"\n⚙️  Config:")
     try:
-        from backend.app.config import Config
-        check("Device", lambda: Config.DEVICE)
-        check("ASR model", lambda: Config.ASR_MODEL)
-        check("MT model", lambda: Config.MT_MODEL)
-        check("TTS model", lambda: Config.TTS_MODEL)
-        check("Sample rate", lambda: f"{Config.SAMPLE_RATE} Hz")
-        check("Model cache dir", lambda: str(Config.MODEL_CACHE_DIR))
+        from backend.app import config as app_config
+        check("Device", lambda: app_config.DEVICE)
+        check("ASR model", lambda: app_config.ASR_MODEL)
+        check("MT models", lambda: list(app_config.MT_MODELS.keys()))
+        check("TTS engine", lambda: app_config.TTS_ENGINE)
+        check("Sample rate", lambda: f"{app_config.CAPTURE_SAMPLE_RATE} Hz")
+        check("Model cache dir", lambda: str(app_config.MODEL_CACHE_DIR))
     except Exception as e:
         print(f"  ⚠️  Could not load config: {e}")
 
     # ── Model files ──
     print(f"\n📁 Model Cache:")
-    from backend.app.config import Config
-    cache_dir = Config.MODEL_CACHE_DIR
-    if cache_dir.exists():
-        items = list(cache_dir.iterdir())
-        if items:
-            for item in items[:10]:
-                print(f"  📄 {item.name}")
-            if len(items) > 10:
-                print(f"  ... and {len(items) - 10} more")
+    try:
+        from backend.app.config import MODEL_CACHE_DIR
+        cache_dir = Path(MODEL_CACHE_DIR)
+        if cache_dir.exists():
+            items = list(cache_dir.iterdir())
+            if items:
+                for item in items[:10]:
+                    print(f"  📄 {item.name}")
+                if len(items) > 10:
+                    print(f"  ... and {len(items) - 10} more")
+            else:
+                print("  (empty — run scripts/download_models.py first)")
         else:
-            print("  (empty — run scripts/download_models.py first)")
-    else:
-        print(f"  (directory not found: {cache_dir})")
+            print(f"  (directory not found: {cache_dir})")
+    except Exception as e:
+        print(f"  ⚠️  Could not list cache: {e}")
 
     # ── Summary ──
     print(f"\n{'='*60}")

@@ -1,16 +1,15 @@
 """
 ASR Engine — pseudo-streaming speech recognition.
 
-Uses faster-whisper (CTranslate2) for efficient CPU/GPU inference.
+Uses Qwen3-ASR (qwen-asr package) for multilingual speech recognition.
 Operates on a sliding window from the AudioBuffer:
   1. Every ASR_INTERVAL_MS, grab the last WINDOW_SEC seconds of audio.
-  2. Run Whisper transcription on that window.
+  2. Run Qwen3-ASR transcription on that window.
   3. Return the full hypothesis string.
 
-Hallucination defences:
+Hallucination defences (applied to model output):
   - Audio energy gate: skip transcription if RMS is below threshold.
-  - Silero VAD pre-filter: faster-whisper's built-in VAD discards silence.
-  - Per-segment filtering: drop segments with high no_speech_prob or low avg_logprob.
+  - Pattern filter: drop common subtitle/hallucination phrases.
   - Repetition filter: detect repeated hallucination patterns.
 
 The CommitTracker (external) decides what to commit.
@@ -20,6 +19,7 @@ import asyncio
 import logging
 import re
 import numpy as np
+from collections import Counter
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -27,15 +27,9 @@ logger = logging.getLogger(__name__)
 # ── Hallucination heuristics ────────────────────────────
 
 # Minimum RMS energy to consider audio as containing speech.
-# Below this, we skip ASR entirely (prevents silence hallucinations).
-_MIN_RMS_ENERGY = 0.008  # ~-42 dB; typical quiet room noise is ~0.002-0.005
-
-# Whisper segment filters
-_MAX_NO_SPEECH_PROB = 0.6    # discard segments above this
-_MIN_AVG_LOGPROB = -1.0      # discard segments below this (low confidence)
+_MIN_RMS_ENERGY = 0.008  # ~-42 dB
 
 # Repeated/hallucinated pattern detection
-# Added Spanish variants of common YouTube/subtitle hallucinations
 _HALLUCINATION_PATTERNS = re.compile(
     r'(subtitle|subscribe|suscr[ií]bete|suscr[ií]banse|gracias por ver|thank you for watching'
     r'|music|applause|m[uú]sica|aplausos'
@@ -43,6 +37,40 @@ _HALLUCINATION_PATTERNS = re.compile(
     r'|\bwww\.\w+\.\w+\b)',
     re.IGNORECASE,
 )
+
+# Qwen3-ASR expects language names (e.g. "Spanish", "English"). Map from our codes.
+_LANG_CODE_TO_QWEN: dict[str, Optional[str]] = {
+    "es": "Spanish",
+    "en": "English",
+    "zh": "Chinese",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "ru": "Russian",
+    "ar": "Arabic",
+    "yue": "Cantonese",
+    "th": "Thai",
+    "vi": "Vietnamese",
+    "id": "Indonesian",
+    "tr": "Turkish",
+    "hi": "Hindi",
+    "ms": "Malay",
+    "nl": "Dutch",
+    "sv": "Swedish",
+    "pl": "Polish",
+    "el": "Greek",
+    "hu": "Hungarian",
+    "fa": "Persian",
+    "fil": "Filipino",
+    "cs": "Czech",
+    "da": "Danish",
+    "fi": "Finnish",
+    "ro": "Romanian",
+    "mk": "Macedonian",
+}
 
 
 def _compute_rms(audio: np.ndarray) -> float:
@@ -56,11 +84,8 @@ def _is_repetitive(text: str, threshold: float = 0.5) -> bool:
     if len(words) < 4:
         return False
     unique = set(words)
-    # If more than half the words are just 1-2 unique tokens, it's repetitive
     if len(unique) <= 2 and len(words) >= 6:
         return True
-    # Check if any single word appears > threshold of the time
-    from collections import Counter
     counts = Counter(words)
     most_common_count = counts.most_common(1)[0][1]
     if most_common_count / len(words) > threshold:
@@ -68,49 +93,78 @@ def _is_repetitive(text: str, threshold: float = 0.5) -> bool:
     return False
 
 
-class ASREngine:
-    """Whisper-based ASR with sliding-window pseudo-streaming."""
+def _apply_post_filters(text: str) -> str:
+    """Apply hallucination filters to raw ASR output. Returns empty string if rejected."""
+    if not text or not text.strip():
+        return ""
+    t = text.strip()
+    if _HALLUCINATION_PATTERNS.search(t):
+        logger.debug(f"Dropping hallucination pattern: '{t[:50]}'")
+        return ""
+    if _is_repetitive(t):
+        logger.debug(f"Dropping repetitive hypothesis: '{t[:80]}'")
+        return ""
+    return t
 
-    def __init__(self, model_size: str = "base", device: str = "cpu"):
-        self.model_size = model_size
+
+def _language_for_qwen(code: str) -> Optional[str]:
+    """Map client language code (e.g. 'es') to Qwen3-ASR language name, or None for auto."""
+    if not code:
+        return None
+    return _LANG_CODE_TO_QWEN.get(code.strip().lower(), None)
+
+
+class ASREngine:
+    """
+    Qwen3-ASR based ASR with sliding-window pseudo-streaming.
+    Same interface as before: load(), transcribe(audio, language) -> str.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "Qwen/Qwen3-ASR-0.6B",
+        device: str = "cpu",
+        max_new_tokens: int = 256,
+        max_inference_batch_size: int = 32,
+    ):
+        self.model_name = model_name
         self.device = device
+        self.max_new_tokens = max_new_tokens
+        self.max_inference_batch_size = max_inference_batch_size
         self._model = None
         self._loaded = False
 
     def load(self) -> None:
-        """Load the faster-whisper model. Call once at startup."""
+        """Load the Qwen3-ASR model. Call once at startup."""
         if self._loaded:
             return
         try:
-            from faster_whisper import WhisperModel
+            import torch
+            from qwen_asr import Qwen3ASRModel
 
-            compute = "float32"
-            fw_device = "cpu"
-            if self.device == "cuda":
-                fw_device = "cuda"
-                compute = "float16"
-            elif self.device == "mps":
-                # faster-whisper doesn't support MPS directly;
-                # it uses CTranslate2 which is CPU or CUDA.
-                fw_device = "cpu"
-                compute = "float32"
-                logger.info("faster-whisper: MPS not supported, using CPU")
+            dtype = torch.bfloat16 if self.device == "cuda" else torch.float32
+            device_map = "cuda:0" if self.device == "cuda" else "cpu"
+            if self.device == "mps":
+                device_map = "cpu"
+                dtype = torch.float32
+                logger.info("Qwen3-ASR: MPS not officially supported, using CPU")
 
-            self._model = WhisperModel(
-                self.model_size,
-                device=fw_device,
-                compute_type=compute,
+            self._model = Qwen3ASRModel.from_pretrained(
+                self.model_name,
+                dtype=dtype,
+                device_map=device_map,
+                max_inference_batch_size=self.max_inference_batch_size,
+                max_new_tokens=self.max_new_tokens,
             )
             self._loaded = True
             logger.info(
-                f"ASR loaded: faster-whisper {self.model_size} on {fw_device} ({compute})"
+                f"ASR loaded: Qwen3-ASR {self.model_name} on {device_map} ({dtype})"
             )
-        except ImportError:
+        except ImportError as e:
             logger.error(
-                "faster-whisper not installed. "
-                "Run: pip install faster-whisper"
+                "qwen-asr not installed. Run: pip install qwen-asr"
             )
-            raise
+            raise ImportError("qwen-asr is required for ASR. pip install qwen-asr") from e
 
     async def transcribe(
         self,
@@ -127,7 +181,6 @@ class ASREngine:
         if audio is None or len(audio) < 8000:  # < 0.5s
             return ""
 
-        # ── Energy gate: skip ASR if audio is too quiet ──
         rms = _compute_rms(audio)
         if rms < _MIN_RMS_ENERGY:
             logger.debug(f"Audio too quiet (RMS={rms:.5f}), skipping ASR")
@@ -141,57 +194,28 @@ class ASREngine:
     def _transcribe_sync(self, audio: np.ndarray, language: str) -> str:
         """Synchronous transcription (called from thread pool)."""
         try:
-            segments, info = self._model.transcribe(
-                audio,
-                language=language,
-                beam_size=5,              # Increased from 3 for better accuracy
-                best_of=3,                # Increased from 1: try 3 candidates, pick best
-                temperature=0.0,         # Deterministic (greedy decoding)
-                without_timestamps=False, # need timestamps for filtering
-                vad_filter=True,          # Silero VAD: suppress silence hallucinations
-                vad_parameters=dict(
-                    min_silence_duration_ms=300,   # merge pauses < 300ms
-                    speech_pad_ms=200,             # padding around speech
-                    threshold=0.4,                 # VAD sensitivity: increased from 0.35 to 0.4
-                    # Higher threshold = less sensitive = fewer false cuts on speech
-                ),
+            # Qwen3-ASR accepts (np.ndarray, sample_rate) or path/URL/base64
+            audio_input = (audio.astype(np.float32), 16000)
+            lang = _language_for_qwen(language)  # "Spanish" or None for auto
+
+            results = self._model.transcribe(
+                audio=audio_input,
+                language=lang,
             )
-            text_parts = []
-            for seg in segments:
-                # ── Per-segment hallucination filters ──
-                if seg.no_speech_prob > _MAX_NO_SPEECH_PROB:
-                    logger.debug(
-                        f"Dropping segment (no_speech_prob={seg.no_speech_prob:.2f}): "
-                        f"'{seg.text.strip()[:50]}'"
-                    )
-                    continue
-
-                if seg.avg_logprob < _MIN_AVG_LOGPROB:
-                    logger.debug(
-                        f"Dropping segment (avg_logprob={seg.avg_logprob:.2f}): "
-                        f"'{seg.text.strip()[:50]}'"
-                    )
-                    continue
-
-                text = seg.text.strip()
-
-                # Pattern-based hallucination filter
-                if _HALLUCINATION_PATTERNS.search(text):
-                    logger.debug(f"Dropping hallucination pattern: '{text[:50]}'")
-                    continue
-
-                if text:
-                    text_parts.append(text)
-
-            result = " ".join(text_parts).strip()
-
-            # Final check: repetitive output
-            if _is_repetitive(result):
-                logger.debug(f"Dropping repetitive hypothesis: '{result[:80]}'")
+            if not results:
                 return ""
 
-            return result
+            raw = results[0].text
+            if not raw:
+                return ""
 
+            # Strip optional "lang XXX: " prefix if present (e.g. "lang English: Hi there")
+            if raw.lower().startswith("lang "):
+                idx = raw.find(":", 5)
+                if idx != -1:
+                    raw = raw[idx + 1 :].strip()
+
+            return _apply_post_filters(raw)
         except Exception as e:
-            logger.error(f"ASR transcription error: {e}")
+            logger.error(f"ASR transcription error: {e}", exc_info=True)
             return ""

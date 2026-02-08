@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
-from .config import HOST, PORT, LOG_LEVEL, resolve_device, ASR_MODEL_SIZE, TTS_ENGINE, TTS_QWEN3_MODEL, TTS_SAMPLE_RATE
+from .config import HOST, PORT, LOG_LEVEL, resolve_device, ASR_MODEL, ASR_MAX_NEW_TOKENS, ASR_MAX_BATCH_SIZE, TTS_ENGINE, TTS_QWEN3_MODEL, TTS_SAMPLE_RATE
 from .pipeline.asr import ASREngine
 from .pipeline.mt import MTEngine
 from .pipeline.tts import TTSEngine
@@ -40,8 +40,13 @@ async def lifespan(app: FastAPI):
     device = resolve_device()
     logger.info(f"Device: {device}")
 
-    # ASR
-    asr_engine = ASREngine(model_size=ASR_MODEL_SIZE, device=device)
+    # ASR (Qwen3-ASR)
+    asr_engine = ASREngine(
+        model_name=ASR_MODEL,
+        device=device,
+        max_new_tokens=ASR_MAX_NEW_TOKENS,
+        max_inference_batch_size=ASR_MAX_BATCH_SIZE,
+    )
     asr_engine.load()
 
     # MT (lazy-loaded per pair, but we pre-load es-en)

@@ -35,7 +35,7 @@ A low-latency speech-to-speech translation system that begins playing translated
 │  │                                                            │  │
 │  │  ┌─────────┐    ┌──────────┐    ┌──────┐    ┌──────────┐  │  │
 │  │  │ Audio   │───►│ ASR      │───►│  MT  │───►│  TTS     │  │  │
-│  │  │ Buffer  │    │ (Whisper)│    │      │    │ (Qwen3)  │  │  │
+│  │  │ Buffer  │    │(Qwen3-ASR)│   │      │    │ (Qwen3)  │  │  │
 │  │  │ Circular│    │ Sliding  │    │Marian│    │ Streaming│  │  │
 │  │  └─────────┘    │ Window   │    │  MT  │    │ Chunks   │  │  │
 │  │                 └────┬─────┘    └──────┘    └──────────┘  │  │
@@ -52,7 +52,7 @@ A low-latency speech-to-speech translation system that begins playing translated
 
 1. **Browser** captures microphone → AudioWorklet resamples to 16kHz mono PCM16 → Base64 → JSON over WebSocket
 2. **Backend** receives chunks → appends to circular audio buffer
-3. **ASR** runs every `ASR_CHECK_MS` ms over a sliding window of `ASR_WINDOW_SEC` seconds
+3. **ASR** (Qwen3-ASR) runs every `ASR_INTERVAL_MS` ms over a sliding window of `WINDOW_SEC` seconds
 4. **Commit Tracker** compares consecutive ASR hypotheses → commits stable prefix after K repetitions or timeout
 5. **MT** translates only **new committed text** (no re-translation)
 6. **TTS** synthesizes translation in streaming chunks (24kHz PCM16)
@@ -64,62 +64,42 @@ A low-latency speech-to-speech translation system that begins playing translated
 
 ### Prerequisites
 
-- **Python 3.11+**
+- **Python 3.10+**
 - **Node.js 18+** and npm
-- **ffmpeg** (for audio processing): `brew install ffmpeg` (macOS) or `apt install ffmpeg` (Linux)
-- ~4GB free disk space for models
+- ~4GB free disk space for models (Qwen3-ASR, MT, TTS)
 
-### 1. Clone & Setup
+### 1. Clone & one-shot setup
 
-```bash
-cd rtt
-
-# Copy environment config
-cp env.example .env  # Edit .env to customize device, models, etc.
-```
-
-### 2. Backend Setup
+From the repository root:
 
 ```bash
-cd backend
-
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Download models (optional — they auto-download on first run)
-cd ..
-python scripts/download_models.py
+chmod +x setup.sh
+./setup.sh
 ```
 
-### 3. Frontend Setup
+This creates `backend/venv`, installs backend and frontend dependencies, and copies `env.example` to `.env` if missing.
 
-```bash
-cd frontend
-npm install
-```
-
-### 4. Run
+### 2. Run
 
 **Terminal 1 — Backend:**
 ```bash
-cd backend
-source venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+cd backend && source venv/bin/activate && python -m app.main
 ```
 
 **Terminal 2 — Frontend:**
 ```bash
-cd frontend
-npm run dev
+cd frontend && npm run dev
 ```
 
-Open **http://localhost:5173** in your browser.
+Open **http://localhost:5173**.
 
-### 5. Run with Docker (Alternative)
+### 3. Optional: pre-download models
+
+```bash
+PYTHONPATH=. backend/venv/bin/python scripts/download_models.py
+```
+
+### 4. Run with Docker
 
 ```bash
 docker-compose up --build
@@ -132,26 +112,30 @@ Open **http://localhost:5173**
 
 | Variable | Default | Description |
 |---|---|---|
-| `DEVICE` | `mps`/`cpu` (auto) | Compute device: `cpu`, `cuda`, `mps` |
-| `ASR_MODEL` | `base` | Faster-Whisper model size: `tiny`, `base`, `small`, `medium`, `large-v2` |
-| `ASR_BUFFER_SEC` | `5.0` | Circular buffer max duration (seconds) |
-| `ASR_WINDOW_SEC` | `3.0` | Sliding window for each ASR invocation |
-| `ASR_CHECK_MS` | `500` | Interval between ASR checks (milliseconds) |
-| `COMMIT_STABILITY_K` | `3` | Consecutive stable hypotheses required to commit |
-| `COMMIT_MIN_TIME_SEC` | `1.5` | Time-based commit fallback (seconds) |
-| `MT_MODEL` | `Helsinki-NLP/opus-mt-es-en` | MarianMT model for translation |
-| `TTS_MODEL` | `Qwen/Qwen3-TTS-0.6B` | TTS model (Qwen3-TTS) |
-| `TTS_VOICE_MODE` | `CustomVoice` | Voice mode: `CustomVoice` or `VoiceDesign` |
+| `DEVICE` | `cpu` | Compute device: `cpu`, `cuda`, `mps` |
+| `ASR_MODEL` | `Qwen/Qwen3-ASR-0.6B` | Qwen3-ASR model (or `Qwen/Qwen3-ASR-1.7B`) |
+| `ASR_MAX_NEW_TOKENS` | `256` | Max tokens per ASR output |
+| `WINDOW_SEC` | `8.0` | Sliding window duration (seconds) |
+| `ASR_INTERVAL_MS` | `500` | Interval between ASR runs (ms) |
+| `COMMIT_STABILITY_K` | `3` | Consecutive stable hypotheses to commit |
+| `COMMIT_TIMEOUT_SEC` | `2.0` | Force-commit timeout (seconds) |
+| `COMMIT_MIN_WORDS` | `1` | Minimum words to commit |
+| `MT_MODEL_ES_EN` | `Helsinki-NLP/opus-mt-es-en` | MarianMT Spanish→English |
+| `MT_MODEL_EN_ES` | `Helsinki-NLP/opus-mt-en-es` | MarianMT English→Spanish |
+| `TTS_ENGINE` | `edge-tts` | TTS backend (`edge-tts` or `qwen3`) |
+| `TTS_QWEN3_MODEL` | `Qwen/Qwen3-TTS-0.6B` | TTS model when using qwen3 |
+| `CAPTURE_SAMPLE_RATE` | `16000` | Mic capture sample rate (Hz) |
 | `MODEL_CACHE_DIR` | `./models` | Local model cache directory |
+| `HOST` / `PORT` | `0.0.0.0` / `8000` | Backend bind address |
 | `LOG_LEVEL` | `INFO` | Logging level |
 
-### Device Notes
+### Device notes
 
 | Device | Notes |
 |---|---|
-| **MPS** (Apple Silicon) | Auto-detected on macOS. Faster-Whisper uses CTranslate2 which may not support MPS — falls back to CPU automatically. |
-| **CUDA** | Full GPU acceleration. Requires `torch` with CUDA support. |
-| **CPU** | Universal fallback. Slower but always works. Use `ASR_MODEL=tiny` for better performance. |
+| **CUDA** | Full GPU acceleration for ASR/MT/TTS. |
+| **MPS** (Apple Silicon) | Auto-detected on macOS; Qwen3-ASR may fall back to CPU. |
+| **CPU** | Works everywhere; use `ASR_MODEL=Qwen/Qwen3-ASR-0.6B` for speed. |
 
 **Lightweight config (no GPU / low RAM):**
 ```env
@@ -245,12 +229,10 @@ cd backend
 source venv/bin/activate
 
 # Run all tests
-pytest tests/ -v
+cd backend && source venv/bin/activate && pytest tests/ -v
 
-# Run specific test suites
-pytest tests/test_audio_buffer.py -v
-pytest tests/test_commit_tracker.py -v
-pytest tests/test_output_assembly.py -v
+# Or from repo root with PYTHONPATH
+PYTHONPATH=backend backend/venv/bin/python -m pytest backend/tests/ -v
 ```
 
 Tests cover:
@@ -274,7 +256,7 @@ rtt/
 │   │   │   ├── commit_tracker.py  # Stability-based commit logic
 │   │   │   └── backpressure.py    # TTS queue backpressure manager
 │   │   ├── pipeline/
-│   │   │   ├── asr.py             # Faster-Whisper ASR engine
+│   │   │   ├── asr.py             # Qwen3-ASR engine
 │   │   │   ├── mt.py              # MarianMT translation engine
 │   │   │   ├── tts.py             # Qwen3-TTS engine (+ mock)
 │   │   │   └── orchestrator.py    # Pipeline coordination
