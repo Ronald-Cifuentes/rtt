@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+      - ./backend:/app/backend
+    environment:
+      - DEVICE=cpu
+      - MODEL_CACHE_DIR=/app/models
+      - LOG_LEVEL=INFO
+      - ASR_MODEL=base
+      - MT_MODEL=Helsinki-NLP/opus-mt-es-en
+      - TTS_MODEL=Qwen/Qwen3-TTS-0.6B
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
